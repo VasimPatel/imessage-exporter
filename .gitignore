@@ -2,3 +2,7 @@ messages/
 imessage_export/
 __pycache__/
 *.pyc
+logs/
+*.pid
+*.log
+message_sync_state.json
