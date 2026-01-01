@@ -1,0 +1,4 @@
+messages/
+imessage_export/
+__pycache__/
+*.pyc
