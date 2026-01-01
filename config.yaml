@@ -1,0 +1,10 @@
+sync_interval: 6        # hours
+source_path: ~/Library/Messages/chat.db
+destination_dir: ./messages
+keep_backups: 3         # number of backup copies to retain (0 to disable)
+log_level: INFO
+log_dir: ./logs
+pid_file: ./message_sync.pid
+state_file: ./message_sync_state.json
+log_max_bytes: 5242880  # 5 MB
+log_backup_count: 3
