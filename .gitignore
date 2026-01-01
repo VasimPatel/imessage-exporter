@@ -6,3 +6,4 @@ logs/
 *.pid
 *.log
 message_sync_state.json
+myenv/
