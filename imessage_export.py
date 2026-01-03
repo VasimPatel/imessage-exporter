@@ -4,10 +4,12 @@ import datetime
 import pathlib
 import json
 import csv
-import sys
 import os
 import re
+import sys
 from typing import List, Dict, Optional, Tuple, Any, Union
+
+from vcard_index import VCardIndex
 
 # Try to import tqdm for progress bar, fallback if not available
 try:
@@ -140,34 +142,65 @@ class DBHandler:
         return []
 
 class Exporter:
-    def __init__(self, output_dir: str, output_format: str):
+    def __init__(self, output_dir: str, output_format: str, contact_index: Optional[VCardIndex] = None):
         self.output_dir = output_dir
         self.output_format = output_format
         self.created_chat_dirs: Dict[str, int] = {} # Map path to chat_id to detect collisions
+        self.contact_index = contact_index
 
-    def get_chat_name(self, chat_row: Tuple[int, str, str], participants: List[str]) -> str:
+    def resolve_handle(self, handle: Optional[str]) -> str:
+        """
+        Resolve a handle (phone/email) to a contact name when possible.
+        """
+        if not handle:
+            return "Unknown"
+
+        if self.contact_index:
+            contact = self.contact_index.get_by_phone(handle) or self.contact_index.get_by_email(handle)
+            if contact:
+                return contact.full_name
+
+        return handle
+
+    def resolve_participants(self, participants: List[str]) -> List[str]:
+        return [self.resolve_handle(p) for p in participants]
+
+    def get_chat_name(
+        self,
+        chat_row: Tuple[int, str, str],
+        participants: List[str],
+        resolved_participants: List[str]
+    ) -> str:
         chat_id, chat_identifier, display_name = chat_row
 
         if display_name:
             return display_name
 
         # If it's a group chat (multiple participants) but no name, join participant names
-        if len(participants) > 1:
-            return ", ".join(participants[:3]) + (f" (+{len(participants)-3})" if len(participants) > 3 else "")
+        if len(resolved_participants) > 1:
+            return ", ".join(resolved_participants[:3]) + (f" (+{len(resolved_participants)-3})" if len(resolved_participants) > 3 else "")
 
         # If individual chat, use the other person's handle
-        if len(participants) == 1:
-            return participants[0]
+        if len(resolved_participants) == 1:
+            return resolved_participants[0]
 
         # Fallback to chat_identifier
-        return chat_identifier
+        return self.resolve_handle(chat_identifier)
 
-    def should_process_chat(self, chat_name: str, filter_contacts: Optional[List[str]]) -> bool:
+    def should_process_chat(
+        self,
+        chat_name: str,
+        participants: List[str],
+        resolved_participants: List[str],
+        filter_contacts: Optional[List[str]]
+    ) -> bool:
         if not filter_contacts:
             return True
+        haystacks = [chat_name, *participants, *resolved_participants]
         for contact in filter_contacts:
-            if contact.lower() in chat_name.lower():
-                return True
+            for target in haystacks:
+                if contact.lower() in target.lower():
+                    return True
         return False
 
     def should_process_message(self, message_date: datetime.datetime, date_range: Optional[List[str]]) -> bool:
@@ -204,9 +237,11 @@ class Exporter:
             if date_key not in organized:
                 organized[date_key] = []
 
+            sender_name: Union[str, None] = "Me" if is_from_me else self.resolve_handle(sender_handle or "Unknown")
+
             organized[date_key].append({
                 "timestamp": msg_date.strftime("%Y-%m-%d %H:%M:%S"),
-                "sender": "Me" if is_from_me else (sender_handle or "Unknown"),
+                "sender": sender_name,
                 "text": text,
                 "is_from_me": bool(is_from_me),
                 "has_attachments": bool(has_attachments)
@@ -271,6 +306,7 @@ def main():
     parser.add_argument("--date-range", nargs=2, metavar=('START', 'END'), help="Date range (YYYY-MM-DD YYYY-MM-DD)")
     parser.add_argument("--contacts", nargs='+', help="Filter by specific contact names or numbers")
     parser.add_argument("--format", choices=['txt', 'json', 'csv'], default='txt', help="Output format")
+    parser.add_argument("--contacts-file", default="contacts/contacts.vcf", help="Path to vCard file for contact name resolution")
 
     args = parser.parse_args()
 
@@ -289,7 +325,19 @@ def main():
     db = DBHandler(args.db_path)
     db.connect()
 
-    exporter = Exporter(args.output_dir, args.format)
+    contact_index: Optional[VCardIndex] = None
+    contacts_path = os.path.expanduser(args.contacts_file)
+    if contacts_path:
+        if os.path.exists(contacts_path):
+            try:
+                contact_index = VCardIndex.from_file(contacts_path)
+                print(f"Loaded {len(contact_index.contacts)} contacts from {contacts_path}")
+            except Exception as e:
+                print(f"Warning: Failed to load contacts file '{contacts_path}': {e}")
+        else:
+            print(f"Warning: Contacts file not found at {contacts_path}. Continuing without contact lookup.")
+
+    exporter = Exporter(args.output_dir, args.format, contact_index)
 
     try:
         chats = db.get_chats()
@@ -303,9 +351,10 @@ def main():
         for chat in tqdm(chats, desc="Exporting chats"):
             chat_id = chat[0]
             participants = db.get_chat_participants(chat_id)
-            chat_name = exporter.get_chat_name(chat, participants)
+            resolved_participants = exporter.resolve_participants(participants)
+            chat_name = exporter.get_chat_name(chat, participants, resolved_participants)
 
-            if not exporter.should_process_chat(chat_name, args.contacts):
+            if not exporter.should_process_chat(chat_name, participants, resolved_participants, args.contacts):
                 continue
 
             messages = db.get_messages_for_chat(chat_id)
