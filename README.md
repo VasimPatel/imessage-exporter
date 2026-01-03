@@ -122,6 +122,7 @@ python imessage_export.py
 | `--format` | Output format: `txt`, `json`, or `csv`. | `txt` |
 | `--contacts` | Filter by specific contact names or numbers (space separated). | (All contacts) |
 | `--date-range` | Filter by date range (`YYYY-MM-DD YYYY-MM-DD`). | (All dates) |
+| `--contacts-file` | Path to a `.vcf` vCard file for resolving phone numbers to contact names. | `contacts/contacts.vcf` |
 
 ### Examples
 
@@ -144,6 +145,9 @@ python imessage_export.py --date-range 2024-01-01 2024-01-31
 ```bash
 python imessage_export.py --db-path ./my_backup/chat.db --output-dir ./my_export
 ```
+
+**Resolve phone numbers to contact names with vCards:**
+Place your exported contacts at `contacts/contacts.vcf` (or provide a custom path with `--contacts-file`) to have chat folders and message senders labeled with the matching contact names whenever available.
 
 ## Output Structure
 
