@@ -60,17 +60,24 @@ def sanitize_filename(name: str) -> str:
 
 class DBHandler:
     def __init__(self, db_path: str):
-        self.db_path = db_path
+        # Convert to absolute path for URI mode compatibility
+        self.db_path = os.path.abspath(db_path)
         self.conn: Optional[sqlite3.Connection] = None
         self.cursor: Optional[sqlite3.Cursor] = None
 
     def connect(self) -> None:
         try:
-            # Connect in read-only mode if possible, but standard connect is fine as we won't write
-            self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+            # Use regular connection with absolute path
+            # SQLite will handle read-only access through file permissions
+            if not os.path.exists(self.db_path):
+                raise sqlite3.Error(f"Database file not found: {self.db_path}")
+            if not os.access(self.db_path, os.R_OK):
+                raise sqlite3.Error(f"Database file is not readable: {self.db_path}")
+            self.conn = sqlite3.connect(self.db_path)
             self.cursor = self.conn.cursor()
         except sqlite3.Error as e:
             print(f"Error connecting to database: {e}")
+            print(f"Attempted path: {self.db_path}")
             sys.exit(1)
 
     def close(self) -> None:

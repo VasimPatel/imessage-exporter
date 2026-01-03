@@ -7,3 +7,5 @@ logs/
 *.log
 message_sync_state.json
 myenv/
+contacts/
+*.vcf
