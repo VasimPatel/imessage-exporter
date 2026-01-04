@@ -7,6 +7,8 @@ import csv
 import os
 import re
 import sys
+import gzip
+import plistlib
 from typing import List, Dict, Optional, Tuple, Any, Union
 
 from vcard_index import VCardIndex
@@ -47,6 +49,50 @@ def convert_apple_time(ts: Optional[int]) -> datetime.datetime:
     except (ValueError, OSError):
         # Handle out of range timestamps
         return datetime.datetime.fromtimestamp(0, datetime.timezone.utc)
+
+def decode_rich_text(raw: Optional[Union[bytes, memoryview]]) -> Optional[str]:
+    """
+    Attempts to decode rich text payloads stored as plists, optionally gzip-compressed.
+    Returns a string if it can be extracted, otherwise None.
+    """
+    if raw is None:
+        return None
+
+    data = bytes(raw)
+
+    try:
+        if data.startswith(b"\x1f\x8b"):
+            data = gzip.decompress(data)
+    except OSError:
+        # If decompression fails, continue with original data
+        pass
+
+    try:
+        parsed = plistlib.loads(data)
+    except Exception:
+        return None
+
+    def _extract_text(obj: Any) -> Optional[str]:
+        if isinstance(obj, str):
+            return obj
+        if isinstance(obj, bytes):
+            try:
+                return obj.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+        if isinstance(obj, dict):
+            for value in obj.values():
+                result = _extract_text(value)
+                if result:
+                    return result
+        if isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                result = _extract_text(item)
+                if result:
+                    return result
+        return None
+
+    return _extract_text(parsed)
 
 def sanitize_filename(name: str) -> str:
     """
@@ -118,10 +164,10 @@ class DBHandler:
             return [row[0] for row in self.cursor.fetchall()]
         return []
 
-    def get_messages_for_chat(self, chat_id: int) -> List[Tuple[Optional[str], int, int, Optional[str], int]]:
+    def get_messages_for_chat(self, chat_id: int) -> List[Tuple[Optional[str], int, int, Optional[str], int, Optional[bytes], Optional[bytes]]]:
         """
         Retrieves messages for a specific chat.
-        Returns list of (text, date, is_from_me, handle_id, cache_has_attachments)
+        Returns list of (text, date, is_from_me, handle_id, cache_has_attachments, attributedBody, message_summary_info)
         """
         query = """
             SELECT
@@ -129,7 +175,9 @@ class DBHandler:
                 message.date,
                 message.is_from_me,
                 handle.id,
-                message.cache_has_attachments
+                message.cache_has_attachments,
+                message.attributedBody,
+                message.message_summary_info
             FROM message
             LEFT JOIN chat_message_join ON message.ROWID = chat_message_join.message_id
             LEFT JOIN handle ON message.handle_id = handle.ROWID
@@ -211,17 +259,17 @@ class Exporter:
         msg_date_str = message_date.strftime("%Y-%m-%d")
         return start_date <= msg_date_str <= end_date
 
-    def process_messages(self, messages: List[Tuple[Optional[str], int, int, Optional[str], int]], date_range: Optional[List[str]]) -> Dict[str, List[Dict[str, Any]]]:
+    def process_messages(self, messages: List[Tuple[Optional[str], int, int, Optional[str], int, Optional[bytes], Optional[bytes]]], date_range: Optional[List[str]]) -> Dict[str, List[Dict[str, Any]]]:
         """
         Organizes messages by date.
         """
         organized: Dict[str, List[Dict[str, Any]]] = {}
         for msg in messages:
-            text, date_ts, is_from_me, sender_handle, has_attachments = msg
+            text, date_ts, is_from_me, sender_handle, has_attachments, attributed_body, summary_info = msg
 
             # Handle empty text (e.g., attachment only)
-            if text is None:
-                text = ""
+            if not text:
+                text = decode_rich_text(attributed_body) or decode_rich_text(summary_info) or ""
 
             # If attachment indicator
             if has_attachments:
