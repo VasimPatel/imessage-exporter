@@ -53,6 +53,7 @@ def convert_apple_time(ts: Optional[int]) -> datetime.datetime:
 def decode_rich_text(raw: Optional[Union[bytes, memoryview]]) -> Optional[str]:
     """
     Attempts to decode rich text payloads stored as plists, optionally gzip-compressed.
+    Falls back to extracting text from NSKeyedArchiver format if plist parsing fails.
     Returns a string if it can be extracted, otherwise None.
     """
     if raw is None:
@@ -67,32 +68,89 @@ def decode_rich_text(raw: Optional[Union[bytes, memoryview]]) -> Optional[str]:
         # If decompression fails, continue with original data
         pass
 
+    # Try standard plist parsing first
     try:
         parsed = plistlib.loads(data)
+        
+        def _extract_text(obj: Any) -> Optional[str]:
+            if isinstance(obj, str):
+                return obj
+            if isinstance(obj, bytes):
+                try:
+                    return obj.decode("utf-8")
+                except UnicodeDecodeError:
+                    return None
+            if isinstance(obj, dict):
+                for value in obj.values():
+                    result = _extract_text(value)
+                    if result:
+                        return result
+            if isinstance(obj, (list, tuple, set)):
+                for item in obj:
+                    result = _extract_text(item)
+                    if result:
+                        return result
+            return None
+
+        result = _extract_text(parsed)
+        if result:
+            return result
     except Exception:
-        return None
+        # Plist parsing failed, try NSKeyedArchiver extraction
+        pass
 
-    def _extract_text(obj: Any) -> Optional[str]:
-        if isinstance(obj, str):
-            return obj
-        if isinstance(obj, bytes):
-            try:
-                return obj.decode("utf-8")
-            except UnicodeDecodeError:
-                return None
-        if isinstance(obj, dict):
-            for value in obj.values():
-                result = _extract_text(value)
-                if result:
-                    return result
-        if isinstance(obj, (list, tuple, set)):
-            for item in obj:
-                result = _extract_text(item)
-                if result:
-                    return result
-        return None
+    # Fallback: Extract text from NSKeyedArchiver binary format
+    # This handles cases where attributedBody uses NSKeyedArchiver instead of standard plist
+    try:
+        decoded = data.decode('utf-8', errors='replace')
+        # Look for sequences that look like actual message text
+        # Pattern: at least 3 chars, mix of letters, numbers, spaces, common punctuation
+        # Exclude technical strings like "NSObject", "NSString", "kIMMessagePartAttributeName", UUIDs
+        pattern = r'[a-zA-Z0-9\s\.,!?;:\'\"\-\(\)\u2019\u2018\u201C\u201D\u2026]{3,}'
+        matches = re.findall(pattern, decoded)
+        if matches:
+            # Filter out technical strings and return the longest meaningful match
+            filtered = []
+            for m in matches:
+                m_stripped = m.strip()
+                # Skip if too short
+                if len(m_stripped) < 2:
+                    continue
+                # Skip technical strings
+                if (m_stripped.startswith('NS') or 
+                    m_stripped.startswith('kIM') or
+                    m_stripped.startswith('streamtype') or
+                    'AttributeName' in m_stripped or
+                    'Object' in m_stripped or
+                    # Skip UUIDs (8-4-4-4-12 hex pattern)
+                    re.match(r'^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$', m_stripped, re.I) or
+                    # Skip if it's all numbers
+                    all(c in '0123456789' for c in m_stripped)):
+                    continue
+                # Prefer strings with actual letters (not just numbers/punctuation)
+                if any(c.isalpha() for c in m_stripped):
+                    filtered.append(m_stripped)
+            
+            if filtered:
+                # Return the longest match, but prefer ones that look more like messages
+                # (have spaces, punctuation, etc.)
+                def score(s):
+                    score_val = len(s)
+                    if ' ' in s:
+                        score_val += 10  # Prefer strings with spaces
+                    if any(c in s for c in '.,!?;:'):
+                        score_val += 5  # Prefer strings with punctuation
+                    return score_val
+                
+                result = max(filtered, key=score)
+                # Clean up: remove any trailing control characters
+                result = re.sub(r'[\x00-\x1F]+$', '', result)
+                if len(result.strip()) >= 1:
+                    return result.strip()
+    except Exception:
+        pass
 
-    return _extract_text(parsed)
+    return None
 
 def sanitize_filename(name: str) -> str:
     """
