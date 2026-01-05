@@ -149,6 +149,26 @@ python imessage_export.py --db-path ./my_backup/chat.db --output-dir ./my_export
 **Resolve phone numbers to contact names with vCards:**
 Place your exported contacts at `contacts/contacts.vcf` (or provide a custom path with `--contacts-file`) to have chat folders and message senders labeled with the matching contact names whenever available.
 
+## Qdrant collection setup
+
+If you want to store exported messages in Qdrant, use `qdrant_setup.py` to create a collection with columns for the message text, message date, sender name, and chat name stored as payload fields.
+
+```bash
+python qdrant_setup.py --host 127.0.0.1 --port 6333 \
+  --collection-name messages
+```
+
+The script:
+- Connects to Qdrant (optionally with `--api-key` and `--https` for TLS).
+- Creates the collection (or replaces it with `--overwrite`) with a minimal vector stub.
+- Adds payload indexes for:
+  - `message` (text)
+  - `sent_at` (keyword, e.g., ISO 8601 string)
+  - `sender_name` (keyword)
+  - `chat_name` (keyword)
+
+Use `--vector-size` to adjust the placeholder vector size if you plan to add embeddings later.
+
 ## Output Structure
 
 The exported data is organized as follows:
