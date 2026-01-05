@@ -169,6 +169,23 @@ The script:
 
 Use `--vector-size` to adjust the placeholder vector size if you plan to add embeddings later.
 
+To run Qdrant locally via Docker with sensible defaults, use the helper script:
+
+```bash
+./qdrant_docker_setup.sh
+```
+
+The script:
+- Checks that Docker is installed and running.
+- Pulls `qdrant/qdrant:latest`.
+- Starts (or restarts) a container named `qdrant-local` that maps ports `6333` (HTTP) and `6334` (gRPC) and persists data in the `qdrant_storage` volume.
+
+You can override defaults with environment variables:
+
+```bash
+CONTAINER_NAME=my-qdrant HTTP_PORT=7000 GRPC_PORT=7001 VOLUME_NAME=my_qdrant_storage ./qdrant_docker_setup.sh
+```
+
 ## Output Structure
 
 The exported data is organized as follows:
