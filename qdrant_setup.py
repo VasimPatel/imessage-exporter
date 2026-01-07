@@ -31,8 +31,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--vector-size",
         type=int,
-        default=1,
-        help="Placeholder vector size to enable collection creation (default: 1).",
+        default=384,
+        help="Vector size to enable collection creation (default: 384).",
     )
     parser.add_argument(
         "--overwrite",
@@ -61,30 +61,25 @@ def ensure_collection(client: QdrantClient, name: str, vector_size: int) -> None
     )
     print(f"Created collection '{name}' with vector size {vector_size}.")
 
-    client.create_payload_index(
-        collection_name=name,
-        field_name="message",
-        field_schema=PayloadSchemaType.Text,
-    )
-    client.create_payload_index(
-        collection_name=name,
-        field_name="sent_at",
-        field_schema=PayloadSchemaType.Keyword,
-    )
-    client.create_payload_index(
-        collection_name=name,
-        field_name="sender_name",
-        field_schema=PayloadSchemaType.Keyword,
-    )
-    client.create_payload_index(
-        collection_name=name,
-        field_name="chat_name",
-        field_schema=PayloadSchemaType.Keyword,
-    )
-    print(
-        "Added payload indexes for fields: message (text), sent_at (keyword), "
-        "sender_name (keyword), chat_name (keyword)."
-    )
+    # Schema definition
+    schema = {
+        "text": PayloadSchemaType.TEXT,
+        "timestamp": PayloadSchemaType.DATETIME,
+        "chat_id": PayloadSchemaType.INTEGER,
+        "chat_display_name": PayloadSchemaType.KEYWORD,
+        "sender_id": PayloadSchemaType.KEYWORD,
+        "sender_name": PayloadSchemaType.KEYWORD,
+        "participants": PayloadSchemaType.KEYWORD,
+    }
+
+    for field_name, field_schema in schema.items():
+        client.create_payload_index(
+            collection_name=name,
+            field_name=field_name,
+            field_schema=field_schema,
+        )
+
+    print(f"Added payload indexes for fields: {', '.join(schema.keys())}.")
 
 
 def drop_collection(client: QdrantClient, name: str) -> None:
