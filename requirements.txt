@@ -1,3 +1,4 @@
 tqdm
 PyYAML
 qdrant-client
+sentence-transformers

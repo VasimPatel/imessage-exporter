@@ -186,6 +186,25 @@ You can override defaults with environment variables:
 CONTAINER_NAME=my-qdrant HTTP_PORT=7000 GRPC_PORT=7001 VOLUME_NAME=my_qdrant_storage ./qdrant_docker_setup.sh
 ```
 
+## Embeddings to Qdrant
+
+To generate embeddings for each message and store them in Qdrant, use `message_embeddings.py`. This uses a sentence-transformers model and stores the message text plus metadata as payload fields.
+
+```bash
+python message_embeddings.py --db-path messages/chat.db --collection-name messages
+```
+
+You can customize the embedding model, batch size, and connection settings:
+
+```bash
+python message_embeddings.py \
+  --model-name all-MiniLM-L6-v2 \
+  --batch-size 64 \
+  --host 127.0.0.1 \
+  --port 6333 \
+  --collection-name messages
+```
+
 ## Output Structure
 
 The exported data is organized as follows:
