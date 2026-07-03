@@ -78,6 +78,7 @@ class VCardIndex:
         self.contacts: List[Contact] = list(contacts)
         self.phone_index: Dict[str, List[Contact]] = {}
         self.email_index: Dict[str, List[Contact]] = {}
+        self.name_index: Dict[str, List[Contact]] = {}
         self._build_indices()
 
     @classmethod
@@ -88,6 +89,9 @@ class VCardIndex:
 
     def _build_indices(self) -> None:
         for contact in self.contacts:
+            name_key = normalize_name(contact.full_name)
+            if name_key:
+                self.name_index.setdefault(name_key, []).append(contact)
             for phone in contact.phones:
                 for key in normalize_phone_keys(phone):
                     if not key:
@@ -131,6 +135,15 @@ class VCardIndex:
         matches = self.email_index.get(key, [])
         return matches[0] if matches else None
 
+    def get_by_name(self, name: str) -> Optional[Contact]:
+        """Return the first contact matching a normalized display name."""
+
+        key = normalize_name(name)
+        if not key:
+            return None
+        matches = self.name_index.get(key, [])
+        return matches[0] if matches else None
+
 
 # Parsing helpers
 
@@ -138,6 +151,12 @@ def normalize_email(email: str) -> str:
     """Normalize an email address for indexing."""
 
     return email.strip().lower()
+
+
+def normalize_name(name: str) -> str:
+    """Normalize a display name for lookup and identity matching."""
+
+    return " ".join(name.strip().casefold().split())
 
 
 def normalize_phone_keys(phone: str) -> Tuple[str, ...]:

@@ -9,9 +9,9 @@ import re
 import sys
 import gzip
 import plistlib
-from typing import List, Dict, Optional, Tuple, Any, Union
+from typing import List, Dict, Optional, Tuple, Any, Union, Hashable
 
-from vcard_index import VCardIndex
+from vcard_index import VCardIndex, Contact, normalize_email, normalize_name
 
 # Try to import tqdm for progress bar, fallback if not available
 try:
@@ -222,13 +222,16 @@ class DBHandler:
             return [row[0] for row in self.cursor.fetchall()]
         return []
 
-    def get_messages_for_chat(self, chat_id: int) -> List[Tuple[Optional[str], int, int, Optional[str], int, Optional[bytes], Optional[bytes]]]:
+    def get_messages_for_chat(self, chat_id: int) -> List[Tuple[Any, ...]]:
         """
         Retrieves messages for a specific chat.
-        Returns list of (text, date, is_from_me, handle_id, cache_has_attachments, attributedBody, message_summary_info)
+        Returns list of (ROWID, guid, text, date, is_from_me, handle_id,
+        cache_has_attachments, attributedBody, message_summary_info)
         """
         query = """
             SELECT
+                message.ROWID,
+                message.guid,
                 message.text,
                 message.date,
                 message.is_from_me,
@@ -251,8 +254,46 @@ class Exporter:
     def __init__(self, output_dir: str, output_format: str, contact_index: Optional[VCardIndex] = None):
         self.output_dir = output_dir
         self.output_format = output_format
-        self.created_chat_dirs: Dict[str, int] = {} # Map path to chat_id to detect collisions
+        self.created_chat_dirs: Dict[str, str] = {} # Map path to merge key to detect true name collisions
         self.contact_index = contact_index
+
+    def contact_identity(self, contact: Contact) -> str:
+        name_key = normalize_name(contact.full_name)
+        if name_key:
+            return f"contact:{name_key}"
+        for email in contact.emails:
+            email_key = normalize_email(email)
+            if email_key:
+                return f"contact-email:{email_key}"
+        for phone in contact.phones:
+            phone_key = self.phone_identity(phone)
+            if phone_key != "unknown":
+                return f"contact-{phone_key}"
+        return f"contact-object:{id(contact)}"
+
+    def phone_identity(self, value: str) -> str:
+        stripped = value.strip()
+        phoneish = bool(re.fullmatch(r"\+?[0-9 ()\-.]+", stripped))
+        digits = re.sub(r"[^0-9]", "", stripped)
+        if not phoneish or not digits:
+            return "unknown"
+        # NANP numbers commonly appear both as +1XXXXXXXXXX and XXXXXXXXXX.
+        if len(digits) == 11 and digits.startswith("1"):
+            return f"phone:{digits[1:]}"
+        if len(digits) == 10:
+            return f"phone:{digits}"
+        if stripped.startswith("+"):
+            return f"phone:+{digits}"
+        return f"phone:{digits}"
+
+    def resolve_contact(self, value: Optional[str]) -> Optional[Contact]:
+        if not value or not self.contact_index:
+            return None
+        return (
+            self.contact_index.get_by_phone(value)
+            or self.contact_index.get_by_email(value)
+            or self.contact_index.get_by_name(value)
+        )
 
     def resolve_handle(self, handle: Optional[str]) -> str:
         """
@@ -261,12 +302,37 @@ class Exporter:
         if not handle:
             return "Unknown"
 
-        if self.contact_index:
-            contact = self.contact_index.get_by_phone(handle) or self.contact_index.get_by_email(handle)
-            if contact:
-                return contact.full_name
+        contact = self.resolve_contact(handle)
+        if contact:
+            return contact.full_name
 
         return handle
+
+    def handle_identity(self, handle: Optional[str]) -> str:
+        """
+        Return a stable identity key for a handle or contact display name.
+
+        Contact-backed handles intentionally use the contact name as the
+        identity so phone-number chats and display-name-only chats merge.
+        """
+        if not handle:
+            return "unknown"
+
+        contact = self.resolve_contact(handle)
+        if contact:
+            return self.contact_identity(contact)
+
+        stripped = handle.strip()
+        email_key = normalize_email(stripped)
+        if "@" in email_key:
+            return f"email:{email_key}"
+
+        phone_key = self.phone_identity(stripped)
+        if phone_key != "unknown":
+            return phone_key
+
+        name_key = normalize_name(stripped)
+        return f"name:{name_key}" if name_key else "unknown"
 
     def resolve_participants(self, participants: List[str]) -> List[str]:
         return [self.resolve_handle(p) for p in participants]
@@ -293,6 +359,45 @@ class Exporter:
         # Fallback to chat_identifier
         return self.resolve_handle(chat_identifier)
 
+    def get_chat_merge_key(
+        self,
+        chat_row: Tuple[int, str, str],
+        participants: List[str],
+        resolved_participants: List[str]
+    ) -> str:
+        """
+        Compute the identity bucket used for exporting.
+
+        iMessage can create multiple chat rows for the same person, for example
+        one row identified by a phone number and another by the contact display
+        name. Direct chats are keyed by the resolved participant/contact
+        identity; group chats are keyed by their participant identity set.
+        """
+        _chat_id, chat_identifier, display_name = chat_row
+        participant_identities = sorted(
+            identity for identity in (self.handle_identity(p) for p in participants)
+            if identity != "unknown"
+        )
+
+        if len(participant_identities) == 1:
+            return f"direct:{participant_identities[0]}"
+        if len(participant_identities) > 1:
+            return "group:" + "|".join(participant_identities)
+
+        display_identity = self.handle_identity(display_name)
+        if display_identity != "unknown":
+            return f"direct:{display_identity}"
+
+        identifier_identity = self.handle_identity(chat_identifier)
+        if identifier_identity != "unknown":
+            return f"direct:{identifier_identity}"
+
+        normalized_participants = sorted(normalize_name(p) for p in resolved_participants if normalize_name(p))
+        if normalized_participants:
+            return "group:" + "|".join(normalized_participants)
+
+        return f"chat:{chat_row[0]}"
+
     def should_process_chat(
         self,
         chat_name: str,
@@ -317,13 +422,18 @@ class Exporter:
         msg_date_str = message_date.strftime("%Y-%m-%d")
         return start_date <= msg_date_str <= end_date
 
-    def process_messages(self, messages: List[Tuple[Optional[str], int, int, Optional[str], int, Optional[bytes], Optional[bytes]]], date_range: Optional[List[str]]) -> Dict[str, List[Dict[str, Any]]]:
+    def process_messages(self, messages: List[Tuple[Any, ...]], date_range: Optional[List[str]]) -> Dict[str, List[Dict[str, Any]]]:
         """
         Organizes messages by date.
         """
         organized: Dict[str, List[Dict[str, Any]]] = {}
         for msg in messages:
-            text, date_ts, is_from_me, sender_handle, has_attachments, attributed_body, summary_info = msg
+            message_id: Optional[int] = None
+            guid: Optional[str] = None
+            if len(msg) == 9:
+                message_id, guid, text, date_ts, is_from_me, sender_handle, has_attachments, attributed_body, summary_info = msg
+            else:
+                text, date_ts, is_from_me, sender_handle, has_attachments, attributed_body, summary_info = msg
 
             # Handle empty text (e.g., attachment only)
             if not text:
@@ -346,6 +456,8 @@ class Exporter:
             sender_name: Union[str, None] = "Me" if is_from_me else self.resolve_handle(sender_handle or "Unknown")
 
             organized[date_key].append({
+                "_message_id": message_id,
+                "_guid": guid,
                 "timestamp": msg_date.strftime("%Y-%m-%d %H:%M:%S"),
                 "sender": sender_name,
                 "text": text,
@@ -355,25 +467,82 @@ class Exporter:
 
         return organized
 
-    def get_unique_chat_dir(self, base_dir: str, chat_name: str, chat_id: int) -> str:
+    def message_identity(self, message: Dict[str, Any]) -> Hashable:
+        if message.get("_guid"):
+            return ("guid", message["_guid"])
+        if message.get("_message_id") is not None:
+            return ("rowid", message["_message_id"])
+        return (
+            "content",
+            message["timestamp"],
+            message["sender"],
+            message["text"],
+            message["is_from_me"],
+            message["has_attachments"],
+        )
+
+    def merge_organized_messages(
+        self,
+        target: Dict[str, List[Dict[str, Any]]],
+        incoming: Dict[str, List[Dict[str, Any]]]
+    ) -> None:
+        for date_key, messages in incoming.items():
+            target.setdefault(date_key, []).extend(messages)
+
+    def finalize_organized_messages(
+        self,
+        organized_messages: Dict[str, List[Dict[str, Any]]]
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        finalized: Dict[str, List[Dict[str, Any]]] = {}
+        seen: set[Hashable] = set()
+        for date_key in sorted(organized_messages):
+            deduped: List[Dict[str, Any]] = []
+            for message in sorted(organized_messages[date_key], key=lambda m: (m["timestamp"], str(self.message_identity(m)))):
+                identity = self.message_identity(message)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                deduped.append(message)
+            if deduped:
+                finalized[date_key] = deduped
+        return finalized
+
+    def prefer_chat_name(self, current: str, candidate: str) -> str:
+        if not current:
+            return candidate
+        if not candidate:
+            return current
+
+        def is_raw_handle(value: str) -> bool:
+            return "@" in value or bool(re.fullmatch(r"\+?[0-9 ()\-.]+", value.strip()))
+
+        if is_raw_handle(current) and not is_raw_handle(candidate):
+            return candidate
+        return current
+
+    def get_unique_chat_dir(self, base_dir: str, chat_name: str, merge_key: str) -> str:
         """
-        Returns a unique directory path for the chat, handling collisions.
+        Returns a unique directory path for the merged chat, handling only true
+        name collisions between different identities.
         """
         safe_name = sanitize_filename(chat_name)
         full_path = os.path.join(base_dir, safe_name)
 
-        # Check if we already assigned this path to a DIFFERENT chat_id
-        if full_path in self.created_chat_dirs:
-            if self.created_chat_dirs[full_path] != chat_id:
-                # Collision detected! Append chat_id to name
-                safe_name = f"{safe_name}_{chat_id}"
-                full_path = os.path.join(base_dir, safe_name)
+        if full_path in self.created_chat_dirs and self.created_chat_dirs[full_path] != merge_key:
+            suffix = 2
+            while True:
+                candidate_path = os.path.join(base_dir, f"{safe_name}_{suffix}")
+                if candidate_path not in self.created_chat_dirs or self.created_chat_dirs[candidate_path] == merge_key:
+                    full_path = candidate_path
+                    break
+                suffix += 1
 
-        self.created_chat_dirs[full_path] = chat_id
+        self.created_chat_dirs[full_path] = merge_key
         return full_path
 
-    def export(self, chat_name: str, chat_id: int, organized_messages: Dict[str, List[Dict[str, Any]]]) -> None:
-        chat_dir = self.get_unique_chat_dir(self.output_dir, chat_name, chat_id)
+    def export(self, chat_name: str, merge_key: str, organized_messages: Dict[str, List[Dict[str, Any]]]) -> None:
+        chat_dir = self.get_unique_chat_dir(self.output_dir, chat_name, merge_key)
+        organized_messages = self.finalize_organized_messages(organized_messages)
 
         for date_key, messages in organized_messages.items():
             date_dir = os.path.join(chat_dir, date_key)
@@ -384,13 +553,14 @@ class Exporter:
 
             if self.output_format == 'json':
                 with open(filepath, 'w', encoding='utf-8') as f:
-                    json.dump(messages, f, indent=2, ensure_ascii=False)
+                    json.dump([self.export_message(m) for m in messages], f, indent=2, ensure_ascii=False)
 
             elif self.output_format == 'csv':
                 with open(filepath, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
                     writer.writerow(["Timestamp", "Sender", "Message", "From Me", "Has Attachments"])
                     for m in messages:
+                        m = self.export_message(m)
                         writer.writerow([
                             m["timestamp"],
                             m["sender"],
@@ -402,7 +572,11 @@ class Exporter:
             else: # txt
                 with open(filepath, 'w', encoding='utf-8') as f:
                     for m in messages:
+                        m = self.export_message(m)
                         f.write(f"[{m['timestamp']}] {m['sender']}: {m['text']}\n")
+
+    def export_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        return {key: value for key, value in message.items() if not key.startswith("_")}
 
 def main():
     parser = argparse.ArgumentParser(description="Export iMessage chats from chat.db")
@@ -451,8 +625,10 @@ def main():
 
         stats = {
             "processed_chats": 0,
+            "exported_chats": 0,
             "exported_messages": 0
         }
+        aggregated_exports: Dict[str, Dict[str, Any]] = {}
 
         for chat in tqdm(chats, desc="Exporting chats"):
             chat_id = chat[0]
@@ -470,12 +646,31 @@ def main():
             organized_messages = exporter.process_messages(messages, args.date_range)
 
             if organized_messages:
-                exporter.export(chat_name, chat_id, organized_messages)
+                merge_key = exporter.get_chat_merge_key(chat, participants, resolved_participants)
+                if merge_key not in aggregated_exports:
+                    aggregated_exports[merge_key] = {
+                        "chat_name": chat_name,
+                        "messages": {}
+                    }
+                else:
+                    aggregated_exports[merge_key]["chat_name"] = exporter.prefer_chat_name(
+                        aggregated_exports[merge_key]["chat_name"],
+                        chat_name,
+                    )
+                exporter.merge_organized_messages(aggregated_exports[merge_key]["messages"], organized_messages)
                 stats["processed_chats"] += 1
-                stats["exported_messages"] += sum(len(msgs) for msgs in organized_messages.values())
+
+        for merge_key, export_data in aggregated_exports.items():
+            finalized_messages = exporter.finalize_organized_messages(export_data["messages"])
+            if not finalized_messages:
+                continue
+            exporter.export(export_data["chat_name"], merge_key, finalized_messages)
+            stats["exported_chats"] += 1
+            stats["exported_messages"] += sum(len(msgs) for msgs in finalized_messages.values())
 
         print("\nExport Complete!")
-        print(f"Chats Processed: {stats['processed_chats']}")
+        print(f"Source Chats Processed: {stats['processed_chats']}")
+        print(f"Merged Chats Exported: {stats['exported_chats']}")
         print(f"Messages Exported: {stats['exported_messages']}")
         print(f"Output Directory: {os.path.abspath(args.output_dir)}")
 

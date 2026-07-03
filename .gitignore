@@ -1,11 +1,48 @@
+# Private message data and exports
 messages/
 imessage_export/
-__pycache__/
-*.pyc
-logs/
-*.pid
-*.log
-message_sync_state.json
-myenv/
+imessage_export_old/
 contacts/
 *.vcf
+*.db
+*.db-shm
+*.db-wal
+*.backup*
+chat.db*
+
+# Sync/runtime state
+logs/
+*.log
+*.pid
+message_sync_state.json
+
+# Local configuration and secrets
+.env
+.env.*
+*.local
+
+# Python artifacts and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+myenv/
+
+# macOS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local vector/database storage
+qdrant_storage/
